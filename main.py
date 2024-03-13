@@ -1,3 +1,5 @@
+import os
+from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
@@ -5,65 +7,52 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.keys import Keys
+from bs4 import BeautifulSoup
 import csv
 import psycopg2
 
-# Function to find job data from the website
-def find_job():
-    Jobs = WebDriverWait(driver, 30).until(EC.element_to_be_clickable(
-        (By.XPATH, "//div[@class='job ']//div[@class='jobt float-left']//h3[@class='s-18']/a/bdi")))
-    total_occurrences = len(
-        driver.find_elements(By.XPATH, "//div[@class='job ']//div[@class='jobt float-left']//h3[@class='s-18']/a")) + 1
-    for j in range(1, total_occurrences):
-        job_title = WebDriverWait(driver, 5).until(
-            EC.element_to_be_clickable((By.XPATH, f"(//div[@class='job ']/div[@class='jcont'])[{j}]")))
-        job_link = WebDriverWait(driver, 5).until(EC.element_to_be_clickable(
-            (By.XPATH, f"(//div[@class='job ']//div[@class='jobt float-left']//h3[@class='s-18']/a)[{j}]")))
-        job_link = job_link.get_attribute('href')
-        job_data.append({"Job": job_title.text, "Link": job_link})
+load_dotenv()
 
-# Function to save data from CSV to PostgreSQL database
+# Function to save data from CSV to PostgreSQL database without duplicates
 def save_csv_to_postgresql():
-    # Database connection information
-    username_db = 'postgres'
-    password_db = '1234'
-    hostname_db = 'localhost'
-    port_db = '5432'
-    database_name_db = 'db'
 
     # Connect to the PostgreSQL database
     conn = psycopg2.connect(
-        dbname=database_name_db,
-        user=username_db,
-        password=password_db,
-        host=hostname_db,
-        port=port_db
+        dbname=os.getenv("DB_NAME"),
+        user=os.getenv("DB_USERNAME"),
+        password=os.getenv("DB_PASSWORD"),
+        host=os.getenv("DB_HOST"),
+        port=os.getenv("DB_PORT")
     )
 
     # Create a cursor object
     cur = conn.cursor()
 
     # Read data from the CSV file and insert into the database
-    with open("job_data.csv", "r", newline="", encoding="utf-8") as csvfile:
+    with open("job_listings.csv", "r", newline="", encoding="utf-8") as csvfile:
         reader = csv.DictReader(csvfile)
         for row in reader:
-            job_title = row["Job"]
-            job_link = row["Link"]
+            job_title = row["Job Title"]
+            company_name = row["Company Name"]
+            job_link = row["Job Link"]
             try:
-                # Check if the link already exists in the database
-                cur.execute("SELECT job_link FROM job_data WHERE job_link = %s", (job_link,))
-                existing_link = cur.fetchone()
+                # Check if the record already exists in the database
+                cur.execute(
+                    "SELECT 1 FROM rozee_data WHERE job_title = %s AND company_name = %s AND job_link = %s",
+                    (job_title, company_name, job_link)
+                )
+                existing_record = cur.fetchone()
 
-                # If the link doesn't exist, insert the job data into the database
-                if not existing_link:
+                # If the record doesn't exist, insert it into the database
+                if not existing_record:
                     cur.execute(
-                        "INSERT INTO job_data (job_title, job_link) VALUES (%s, %s)",
-                        (job_title, job_link)
+                        "INSERT INTO rozee_data (job_title, company_name, job_link) VALUES (%s, %s, %s)",
+                        (job_title, company_name, job_link)
                     )
                     conn.commit()
-                    print(f"Inserted: {job_title} - {job_link}")
+                    print("Inserted data successfully")
                 else:
-                    print(f"Skipped duplicate link: {job_link}")
+                    print("Skipped duplicate data")
             except Exception as e:
                 print(e)
 
@@ -71,18 +60,16 @@ def save_csv_to_postgresql():
     cur.close()
     conn.close()
 
-# Configure Chrome options
+# Initialize Chrome driver
 option = Options()
 option.add_experimental_option("detach", True)
-
-# Initialize Chrome driver
 driver = webdriver.Chrome(options=option)
 driver.maximize_window()
 
-# Open the website and login
+# Login to the website
 driver.get("https://www.rozee.pk/login")
-username = "shaharmeer01@gmail.com"
-password = "80yar11dy"
+username = os.getenv("ROZEE_EMAIL")
+password = os.getenv("ROZEE_PASSWORD")
 username_field = WebDriverWait(driver, 30).until(
     EC.presence_of_element_located((By.XPATH, "//input[@id='_email']")))
 password_field = WebDriverWait(driver, 30).until(
@@ -93,7 +80,6 @@ login_button = WebDriverWait(driver, 30).until(
     EC.element_to_be_clickable((By.XPATH, "//button[@id='submit_button']")))
 login_button.click()
 
-# Search for jobs
 search_icon = WebDriverWait(driver, 30).until(
     EC.presence_of_element_located((By.XPATH, "//ul[@class='nav navbar-nav navbar-link navbar-right']/li[2]")))
 search_icon.click()
@@ -102,31 +88,52 @@ search_bar = WebDriverWait(driver, 30).until(
 search_bar.send_keys("Python")
 search_bar.send_keys(Keys.RETURN)
 
-# Find and collect job data
-job_data = []
-pagination = len(driver.find_elements(By.XPATH, "(//ul[@class='pagination radius0 float-right ml20 s-14'])[1]/li"))
-find_job()
-for i in range(2, pagination + 1):
-    if i == 3:
-        continue
-    next = driver.find_element(By.XPATH,
-                               f"((//ul[@class='pagination radius0 float-right ml20 s-14'])[1]/li)[{i}]")
-    if next:
-        next.click()
-        find_job()
-    else:
-        break
+try:
+    html_content = driver.page_source
 
-# Save collected job data to a CSV file
-with open("job_data.csv", "w", newline="", encoding="utf-8") as csvfile:
-    fieldnames = ["Job", "Link"]
-    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+    soup = BeautifulSoup(html_content, 'html.parser')
+
+    job_listings = soup.find_all('div', class_='job')
+
+    a = {'Jobs': []}
+    for job in job_listings:
+        job_title_element = job.find('h3', class_='s-18')
+        if job_title_element and job_title_element.a:
+            job_title = job_title_element.a.text.strip()
+        else:
+            continue
+        company_div = job.find('div', class_='cname')
+        company_name = ' '.join([elem.text.strip() for elem in company_div.find_all('a')]) if company_div else 'N/A'
+
+        job_link_element = job.find('h3', class_='s-18').find('a') if job_title_element else None
+        job_link = f"https:{job_link_element['href']}" if job_link_element and 'href' in job_link_element.attrs else 'N/A'
+
+        a['Jobs'].append({
+            'Job Title': job_title,
+            'Company Name': company_name,
+            'Job Link': job_link
+        })
+
+        print(f"Job Title: {job_title}")
+        print(f"Company Name: {company_name}")
+        print(f"Job Link: {job_link}")
+        print("-" * 50)
+
+except TimeoutException:
+    print("Timeout occurred. Failed to locate login or search elements.")
+except Exception as e:
+    print(e)
+finally:
+    driver.quit()
+
+csv_file = 'job_listings.csv'
+job_listings = a['Jobs']
+field_names = ['Job Title', 'Company Name', 'Job Link']
+with open(csv_file, 'w', newline='', encoding='utf-8') as file:
+    writer = csv.DictWriter(file, fieldnames=field_names)
     writer.writeheader()
-    for row in job_data:
-        writer.writerow(row)
+    for job in job_listings:
+        writer.writerow(job)
 
 # Save job data from CSV to PostgreSQL database
 save_csv_to_postgresql()
-
-# Close the driver
-driver.quit()
